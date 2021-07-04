@@ -1,9 +1,16 @@
 import asyncio
+from functools import update_wrapper
 import logging
+from typing import Optional, Union
+from telegram.ext.callbackcontext import CallbackContext
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext.filters import DataDict
+from model.shorttrade import ShortTrade
+from model.longtrade import LongTrade
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, \
-    ConversationHandler, MessageHandler, BaseFilter, run_async, Filters
+    ConversationHandler, MessageHandler, BaseFilter, dispatcher, run_async, Filters
 
 from core.tradeexcutor import TradeExecutor
 from util import formatter
@@ -29,29 +36,22 @@ END_CONVERSATION = ConversationHandler.END
 
 
 class TelegramBot:
-    class PrivateUserFiler(BaseFilter):
-        def __init__(self, user_id):
-            self.user_id = int(user_id)
-
-        def filter(self, message):
-            return message.from_user.id == self.user_id
-
+    def start(update: Update, context: CallbackContext):
+        update.message.reply_text('start commend received')
+    
     def __init__(self, token: str, allowed_user_id, trade_executor: TradeExecutor):
-        self.updater = Updater(token=token)
+        self.updater = Updater(token=token, use_context=True)
         self.dispatcher = self.updater.dispatcher
         self.trade_executor = trade_executor
         self.exchange = self.trade_executor.exchange
-        self.private_filter = self.PrivateUserFiler(allowed_user_id)
         self._prepare()
 
     def _prepare(self):
-
         # Create our handlers
-
-        def show_help(bot, update):
+        def show_help(update, context):
             update.effective_message.reply_text('Type /trade to show options')
 
-        def show_options(bot, update):
+        def show_options(update, context):
             button_list = [
                 [InlineKeyboardButton("Short trade", callback_data=SHORT_TRADE),
                  InlineKeyboardButton("Long trade", callback_data=LONG_TRADE), ],
@@ -62,7 +62,7 @@ class TelegramBot:
             update.message.reply_text("Trade options:", reply_markup=InlineKeyboardMarkup(button_list))
             return TRADE_SELECT
 
-        def process_trade_selection(bot, update, user_data):
+        def process_trade_selection(update, context, user_data):
             query = update.callback_query
             selection = query.data
 
@@ -70,7 +70,7 @@ class TelegramBot:
                 orders = self.exchange.fetch_open_orders()
 
                 if len(orders) == 0:
-                    bot.edit_message_text(text="You don't have open orders",
+                    context.bot.edit_message_text(text="You don't have open orders",
                                           chat_id=query.message.chat_id,
                                           message_id=query.message.message_id)
                     return END_CONVERSATION
@@ -81,7 +81,7 @@ class TelegramBot:
                      InlineKeyboardButton("Cancel order", callback_data=CANCEL)]
                 ]
 
-                bot.edit_message_text(text=formatter.format_open_orders(orders),
+                context.bot.edit_message_text(text=formatter.format_open_orders(orders),
                                       chat_id=query.message.chat_id,
                                       message_id=query.message.message_id,
                                       reply_markup=InlineKeyboardMarkup(keyboard))
@@ -96,50 +96,50 @@ class TelegramBot:
                 msg = "You don't have any available balance" if len(balance) == 0 \
                     else f"Your available balance:\n{formatter.format_balance(balance)}"
 
-                bot.edit_message_text(text=msg,
+                context.bot.edit_message_text(text=msg,
                                       chat_id=query.message.chat_id,
                                       message_id=query.message.message_id)
                 return END_CONVERSATION
 
             user_data[TRADE_SELECT] = selection
-            bot.edit_message_text(text=f'Enter coin name for {selection}',
+            context.bot.edit_message_text(text=f'Enter coin name for {selection}',
                                   chat_id=query.message.chat_id,
                                   message_id=query.message.message_id)
             return COIN_NAME
 
-        def cancel_order(bot, update):
+        def cancel_order(update, context):
             query = update.callback_query
 
             if query.data == CANCEL:
                 query.message.reply_text('Enter order index to cancel: ')
                 return PROCESS_ORD_CANCEL
 
-            show_help(bot, update)
+            show_help(update, context)
             return END_CONVERSATION
 
-        def process_order_cancel(bot, update, user_data):
+        def process_order_cancel(update, context, user_data):
             idx = int(update.message.text)
             order = user_data[OPEN_ORDERS][idx]
             self.exchange.cancel_order(order['id'])
             update.message.reply_text(f'Canceled order: {formatter.format_order(order)}')
             return END_CONVERSATION
 
-        def process_coin_name(bot, update, user_data):
+        def process_coin_name(update, context, user_data):
             user_data[COIN_NAME] = update.message.text.upper()
             update.message.reply_text(f'What amount of {user_data[COIN_NAME]}')
             return AMOUNT
 
-        def process_amount(bot, update, user_data):
+        def process_amount(update, context, user_data):
             user_data[AMOUNT] = float(update.message.text)
             update.message.reply_text(f'What % change for {user_data[AMOUNT]} {user_data[COIN_NAME]}')
             return PERCENT_CHANGE
 
-        def process_percent(bot, update, user_data):
+        def process_percent(update, context, user_data):
             user_data[PERCENT_CHANGE] = float(update.message.text)
             update.message.reply_text(f'What price for 1 unit of {user_data[COIN_NAME]}')
             return PRICE
 
-        def process_price(bot, update, user_data):
+        def process_price(update, context, user_data):
             user_data[PRICE] = float(update.message.text)
 
             keyboard = [
@@ -152,7 +152,7 @@ class TelegramBot:
 
             return PROCESS_TRADE
 
-        def process_trade(bot, update, user_data):
+        def process_trade(update, context, user_data):
             query = update.callback_query
 
             if query.data == CONFIRM:
@@ -160,17 +160,17 @@ class TelegramBot:
                 self._execute_trade(trade)
                 update.callback_query.message.reply_text(f'Scheduled: {trade}')
             else:
-                show_help(bot, update)
+                show_help(update, context)
 
             return END_CONVERSATION
 
-        def handle_error(bot, update, error):
+        def handle_error(update, context, error):
             logging.warning('Update "%s" caused error "%s"', update, error)
             update.message.reply_text(f'Unexpected error:\n{error}')
 
         # configure our handlers
         def build_conversation_handler():
-            entry_handler = CommandHandler('trade', filters=self.private_filter, callback=show_options)
+            entry_handler = CommandHandler('trade', show_options, Filters.chat_type.private)
             conversation_handler = ConversationHandler(
                 entry_points=[entry_handler],
                 fallbacks=[entry_handler],
@@ -184,10 +184,11 @@ class TelegramBot:
                     PRICE: [MessageHandler(Filters.text, callback=process_price, pass_user_data=True)],
                     PROCESS_TRADE: [CallbackQueryHandler(process_trade, pass_user_data=True)],
                 },
+                per_message=False
             )
             return conversation_handler
 
-        self.dispatcher.add_handler(CommandHandler('start', filters=self.private_filter, callback=show_help))
+        self.dispatcher.add_handler(CommandHandler('start', show_help, Filters.chat_type.private))
         self.dispatcher.add_handler(build_conversation_handler())
         self.dispatcher.add_error_handler(handle_error)
 
